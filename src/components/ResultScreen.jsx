@@ -1,39 +1,37 @@
 import { useMemo, useEffect, useState } from 'react';
 import { supabase } from '../supabaseClient';
 
-export default function ResultScreen({ data, onReset }) {
+export default function ResultScreen({ attemptId, onReset }) {
   const [resultData, setResultData] = useState(null);
 
   useEffect(() => {
-    const fetchResult = async () => {
-      const { data: res, error } = await supabase.rpc('get_result', { p_attempt: data.id }); // Note: App.jsx passes attemptData which has 'id' if we add it, but let's fix: App passes attemptId via closure or we use global. Wait, App.jsx doesn't pass attemptId to ResultScreen. Let's fix App.jsx or pass it.
-      // Actually, let's just use the attemptId from localStorage or pass it.
-    };
-    // Better: App.jsx should pass attemptId. Let's adjust App.jsx conceptually, but since I can't change App.jsx now, I'll assume data has id or we get it from localStorage.
-    // Let's use the last active attemptId from localStorage.
-    const history = JSON.parse(localStorage.getItem('cbt_omn_history') || '[]');
-    const last = history[history.length - 1];
-    if (last) {
-      supabase.rpc('get_result', { p_attempt: last.attemptId }).then(({ data: res }) => {
-        setResultData(res);
-      });
-    }
-  }, [data]);
+    if (!attemptId) return;
+    let active = true;
+    supabase.rpc('get_result', { p_attempt: attemptId }).then(({ data, error }) => {
+      if (!active) return;
+      if (error) {
+        alert('Gagal memuat hasil: ' + error.message);
+        return;
+      }
+      setResultData(data);
+    });
+    return () => { active = false; };
+  }, [attemptId]);
 
   const stats = useMemo(() => {
-    if (!resultData) return null;
+    if (!resultData || !resultData.details) return null;
     const details = resultData.details;
     const correct = details.filter(d => d.chosen === d.correct).length;
     const wrong = details.filter(d => d.chosen && d.chosen !== d.correct).length;
     const empty = details.filter(d => !d.chosen).length;
-    
+
     const topicStats = {};
     details.forEach(d => {
       if (!topicStats[d.topic]) topicStats[d.topic] = { total: 0, correct: 0 };
-      topicStats[d.topic].total++;
-      if (d.chosen === d.correct) topicStats[d.topic].correct++;
+      topicStats[d.topic].total += 1;
+      if (d.chosen === d.correct) topicStats[d.topic].correct += 1;
     });
-    
+
     const sortedTopics = Object.entries(topicStats)
       .map(([topic, stat]) => ({ topic, accuracy: (stat.correct / stat.total) * 100 }))
       .sort((a, b) => a.accuracy - b.accuracy);
@@ -50,7 +48,7 @@ export default function ResultScreen({ data, onReset }) {
         <div className="score-big">{resultData.score}</div>
         <div>Skor Akhir</div>
       </div>
-      
+
       <div className="card">
         <div className="stat-row"><span>Benar</span><strong className="text-green">{stats.correct}</strong></div>
         <div className="stat-row"><span>Salah</span><strong className="text-red">{stats.wrong}</strong></div>
