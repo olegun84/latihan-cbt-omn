@@ -6,62 +6,73 @@ import ExamScreen from './components/ExamScreen';
 import ConfirmScreen from './components/ConfirmScreen';
 import ResultScreen from './components/ResultScreen';
 
+function readHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function writeHistory(list) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+}
+
 function App() {
   const [view, setView] = useState('home');
   const [attemptId, setAttemptId] = useState(null);
   const [attemptData, setAttemptData] = useState(null);
   const [timeLeft, setTimeLeft] = useState(DEFAULT_DURATION_SECONDS);
-  const [saveStatus, setSaveStatus] = useState('idle'); // idle, saving, saved, error
+  const [saveStatus, setSaveStatus] = useState('idle');
+
+  const removeHistory = (id) => {
+    writeHistory(readHistory().filter(h => h.attemptId !== id));
+  };
 
   const loadAttempt = useCallback(async (id) => {
-    setSaveStatus('saving');
     const { data, error } = await supabase.rpc('get_attempt', { p_attempt: id });
     if (error || !data) {
-      setSaveStatus('error');
+      removeHistory(id);
+      alert('Gagal memuat latihan: ' + (error ? error.message : 'data tidak ditemukan'));
+      setView('home');
       return;
     }
-    setAttemptData(data);
-    setAttemptId(id);
-    
-    if (data.submitted) {
-      setView('result');
-    } else {
-      setView('exam');
-      const deadline = new Date(data.deadline).getTime();
-      const updateTimer = () => {
-        const left = Math.max(0, Math.floor((deadline - Date.now()) / 1000));
-        setTimeLeft(left);
-        if (left <= 0) {
-          handleSubmit(id);
-        }
-      };
-      updateTimer();
-      const interval = setInterval(updateTimer, 1000);
-      return () => clearInterval(interval);
+    if (!data.questions || data.questions.length === 0) {
+      removeHistory(id);
+      alert('Latihan ini tidak memiliki soal (bank soal masih kosong saat dibuat). Silakan mulai latihan baru.');
+      setView('home');
+      return;
     }
+    setAttemptId(id);
+    setAttemptData({ ...data, answers: data.answers || [] });
+    setView(data.submitted ? 'result' : 'exam');
   }, []);
 
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const history = JSON.parse(saved);
-      const active = history.find(h => !h.submitted && new Date(h.deadline).getTime() > Date.now());
-      if (active) {
-        loadAttempt(active.attemptId);
-      }
-    }
+    const active = readHistory().find(h => !h.submitted && new Date(h.deadline).getTime() > Date.now());
+    if (active) loadAttempt(active.attemptId);
   }, [loadAttempt]);
 
+  useEffect(() => {
+    if (view !== 'exam' || !attemptData || attemptData.submitted) return;
+    const deadline = new Date(attemptData.deadline).getTime();
+    const tick = () => {
+      const left = Math.max(0, Math.floor((deadline - Date.now()) / 1000));
+      setTimeLeft(left);
+      if (left <= 0) handleSubmit(attemptId);
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [view, attemptId, attemptData]);
+
   const handleStart = async (name, grade) => {
-    const { data, error } = await supabase.rpc('start_attempt', { 
-      p_name: name, 
-      p_grade: grade 
-    });
+    const { data, error } = await supabase.rpc('start_attempt', { p_name: name, p_grade: grade });
     if (error) {
       alert('Gagal memulai: ' + error.message);
       return;
     }
-    const newHistory = {
+    const entry = {
       attemptId: data,
       name,
       grade,
@@ -69,13 +80,12 @@ function App() {
       deadline: new Date(Date.now() + DEFAULT_DURATION_SECONDS * 1000).toISOString(),
       submitted: false
     };
-    const history = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([...history, newHistory]));
+    writeHistory([...readHistory(), entry]);
     loadAttempt(data);
   };
 
   const handleSaveAnswer = async (questionId, chosen, flagged) => {
-    if (!attemptId || attemptData?.submitted) return;
+    if (!attemptId || !attemptData || attemptData.submitted) return;
     setSaveStatus('saving');
     const { error } = await supabase.rpc('save_answer', {
       p_attempt: attemptId,
@@ -86,55 +96,48 @@ function App() {
     if (error) {
       setSaveStatus('error');
       setTimeout(() => handleSaveAnswer(questionId, chosen, flagged), 2000);
-    } else {
-      setSaveStatus('saved');
-      setTimeout(() => setSaveStatus('idle'), 1500);
-      loadAttempt(attemptId);
+      return;
     }
+    setAttemptData(prev => {
+      const others = (prev.answers || []).filter(a => a.question_id !== questionId);
+      return { ...prev, answers: [...others, { question_id: questionId, chosen, flagged }] };
+    });
+    setSaveStatus('saved');
+    setTimeout(() => setSaveStatus('idle'), 1500);
   };
 
   const handleSubmit = async (id = attemptId) => {
+    if (!id) return;
     const { data, error } = await supabase.rpc('submit_attempt', { p_attempt: id });
     if (error) {
       alert('Gagal mengumpulkan: ' + error.message);
       return;
     }
-    const history = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-    const updated = history.map(h => h.attemptId === id ? { ...h, submitted: true, score: data } : h);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    writeHistory(readHistory().map(h => (h.attemptId === id ? { ...h, submitted: true, score: data } : h)));
     setView('result');
-    loadAttempt(id);
   };
 
   const handleReset = () => {
     setAttemptId(null);
     setAttemptData(null);
+    setTimeLeft(DEFAULT_DURATION_SECONDS);
     setView('home');
   };
 
   if (view === 'home') return <HomeScreen onStart={handleStart} />;
-  if (view === 'exam') return (
-    <ExamScreen 
-      data={attemptData} 
-      timeLeft={timeLeft} 
-      saveStatus={saveStatus}
-      onSave={handleSaveAnswer}
-      onConfirm={() => setView('confirm')}
-    />
-  );
-  if (view === 'confirm') return (
-    <ConfirmScreen 
-      data={attemptData}
-      onBack={() => setView('exam')}
-      onSubmit={() => handleSubmit()}
-    />
-  );
-  if (view === 'result') return (
-    <ResultScreen 
-      data={attemptData} 
-      onReset={handleReset} 
-    />
-  );
+  if (view === 'exam')
+    return (
+      <ExamScreen
+        data={attemptData}
+        timeLeft={timeLeft}
+        saveStatus={saveStatus}
+        onSave={handleSaveAnswer}
+        onConfirm={() => setView('confirm')}
+      />
+    );
+  if (view === 'confirm')
+    return <ConfirmScreen data={attemptData} onBack={() => setView('exam')} onSubmit={() => handleSubmit()} />;
+  if (view === 'result') return <ResultScreen attemptId={attemptId} onReset={handleReset} />;
   return null;
 }
 
